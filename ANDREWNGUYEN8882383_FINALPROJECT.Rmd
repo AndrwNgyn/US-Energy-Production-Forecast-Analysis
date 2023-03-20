@@ -1,0 +1,1275 @@
+---
+title: "FORECAST AND ANALYSIS OF ELECTRICITY PRODUCTION IN THE UNITED STATES"
+author: "Andrew Nguyen"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(ggfortify)
+library(tidymodels)
+library(tidyverse)
+library(ggpubr)
+library(seasonal)
+library(MASS)
+
+library(forecast)
+library(dplyr)
+library(tseries)
+library(MuMIn) # AICc computations
+library(yardstick) # calculating RMSE of fitted models
+library(astsa) # sarima
+library(UnitCircle) # checking unit circle
+library(Metrics) # mse
+```
+
+\newpage
+
+
+# Introduction
+
+This is the supplementary .rmd file to "Analysis and Forecast of Fossil Fuels and Renewable Energy in the United States". The following code is used to perform analysis and generate graphs relevant to the study. Title sections in this file correspond to sections in the study. Code is provided below.
+
+```{r echo = FALSE}
+# inputting collected data into dataframe
+elec_distr <- data.frame(x = c(0, .07, .39, .54, .66, 0, 0, .33, .41, .27, 0, .23, .22, .48, .18, .12), 
+                   grp = rep(c("PG&E", "First Energy",
+                               "AEP","Southern Company"),
+                               each = 4),
+                   Source = c("Coal", "Natural Gas",
+                               "Nuclear","Renewable"))
+
+# grouped bar plot
+ggplot(elec_distr,aes(x = grp, y =x, fill = Source)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  scale_fill_manual(values = c("#354f52","#52796f", "#84a98c", "#cad2c5")) + 
+  xlab("Electricity Provider Company") + 
+  ylab("Percentage of Total Production") + 
+  theme_light() + 
+  theme(plot.margin = unit(c(0.5,0.5,1,1), "cm")) # resizing
+```
+
+
+# Data Analysis and Experimental Design
+
+## Data Description
+
+```{r include = FALSE}
+# read in data 
+elec_prod_raw <- read.csv("data/Net_generation_United_States_all_sectors_monthly.csv")
+```
+
+```{r echo = FALSE}
+# just to observe all possible electricity production methods
+print("Types of Electricity Production")
+colnames(elec_prod_raw)[-c(1,2)]
+```
+
+## Data Tidying & Empirical Analysis
+
+Before we begin fitting our data to the models, we should first make sure our model is easy to work with. We can see that the data is in reverse order as well as the columns can be renamed for clarity. Additionally, to validate our model performance, we will be training models using data from 2001 to 2021, and forecasting electricity production values for 2022. This way we can assess whether our models are accurate or not.
+
+```{r}
+# loading in data
+elec_prod <- dplyr::select(elec_prod_raw, c("Month", "coal.thousand.megawatthours", 
+                                      "natural.gas.thousand.megawatthours", 
+                                      "nuclear.thousand.megawatthours", 
+                                      "wind.thousand.megawatthours",
+                                      "conventional.hydroelectric.thousand.megawatthours"))
+# renaming columns for clarity
+colnames(elec_prod) <- c("Month", "Coal", "Natural_Gas", "Nuclear", "Wind", "Hydro")
+
+# reordering rows from oldest -> latest
+elec_prod <- elec_prod[order(nrow(elec_prod):1),]
+
+# extracting to individual production types
+coal <- dplyr::select(elec_prod, c("Month", "Coal"))
+coal_train <- coal[c(1:252),]
+coal_test <- coal[c(253:264),]
+
+naturalgas <- dplyr::select(elec_prod, c("Month", "Natural_Gas"))
+naturalgas_train <- naturalgas[c(1:252),]
+naturalgas_test <- naturalgas[c(253:264),]
+
+nuclear <- dplyr::select(elec_prod, c("Month", "Nuclear"))
+nuclear_train <- nuclear[c(1:252),]
+nuclear_test <- nuclear[c(253:264),]
+  
+wind <- dplyr::select(elec_prod, c("Month", "Wind"))
+wind_train <- wind[c(1:252),]
+wind_test <- wind[c(253:264),]
+
+hydro <- dplyr::select(elec_prod, c("Month", "Hydro"))
+hydro_train <- hydro[c(1:252),]
+hydro_test <- hydro[c(253:264),]
+
+# converting to ts object
+coal_train_ts <- ts(coal_train$Coal, frequency = 12, start = c(2001, 1))
+coal_test_ts <- ts(coal_test$Coal, frequency = 12, start = c(2022, 1))
+
+naturalgas_train_ts <- ts(naturalgas_train$Natural_Gas, frequency = 12, start = c(2001, 1))
+naturalgas_test_ts <- ts(naturalgas_test$Natural_Gas, frequency = 12, start = c(2022, 1))
+
+nuclear_train_ts <- ts(nuclear_train$Nuclear, frequency = 12, start = c(2001, 1))
+nuclear_test_ts <- ts(nuclear_test$Nuclear, frequency = 12, start = c(2022, 1))
+
+wind_train_ts <- ts(wind_train$Wind, frequency = 12, start = c(2001, 1))
+wind_test_ts <- ts(wind_test$Wind, frequency = 12, start = c(2022, 1))
+
+hydro_train_ts <- ts(hydro_train$Hydro, frequency = 12, start = c(2001, 1))
+hydro_test_ts <- ts(hydro_test$Hydro, frequency = 12, start = c(2022, 1))
+
+# for ease of running tests on every data set
+data_list <- list(coal_train, naturalgas_train, nuclear_train, wind_train, hydro_train)
+```
+
+```{R echo = FALSE}
+# plotting all time series, code doesn't need to be shown
+coal_plot <- autoplot(coal_train_ts) +
+  theme_light() + 
+  xlab("Coal") + 
+  ylab("Thousand Mwh")
+
+natgas_plot <- autoplot(naturalgas_train_ts) +
+  theme_light() + 
+  xlab("Natural Gas") + 
+  ylab("Thousand Mwh")
+
+nuclear_plot <- autoplot(nuclear_train_ts) +
+  theme_light() + 
+  xlab("Nuclear") + 
+  ylab("Thousand Mwh")
+
+wind_plot <- autoplot(wind_train_ts) +
+  theme_light() + 
+  xlab("Wind") + 
+  ylab("Thousand Mwh")
+
+hydro_plot <- autoplot(hydro_train_ts) +
+  theme_light() + 
+  xlab("Hydro") + 
+  ylab("Thousand Mwh")
+```
+
+```{R echo = FALSE, fig.cap = "Time Series Plots of Each Electricity Production Method"}
+# use ggarrange for plotting ggplots
+ggarrange(coal_plot, natgas_plot, nuclear_plot, wind_plot, hydro_plot, 
+          nrow = 3, 
+          ncol = 2)
+
+```
+
+### Initial Plotting
+
+Before we run any models on these data sets, we need to decompose each of them to determine any properties of the time series and deal with them accordingly.
+
+  From our time series decompositions, we can immediately notice that each series exhibits a clear seasonal pattern. Furthermore, as we observe the `trend` graph for each data set, we can see that coal and natural gas exhibit a linear increase trend, wind exhibiting a quadratic/exponential trend, and nuclear and wind exhibiting unclear trends. Furthermore, we can observe the distribution of our values to see if our data is normal.
+
+```{R echo = FALSE}
+par(mfrow = c(3,2))
+hist(coal_train_ts, main = "Histogram of Coal (in kMWH)", col = "#52796F")
+hist(naturalgas_train_ts, main = "Histogram of Natural Gas (in kMWH)", col = "#52796F")
+hist(nuclear_train_ts, main = "Histogram of Nuclear (in kMWH)", col = "#52796F")
+hist(wind_train_ts, main = "Histogram of Wind (in kMWH)", col = "#52796F")
+hist(hydro_train_ts, main = "Histogram of Hydro (in kMWH)", col = "#52796F")
+```
+### Box Cox Transformations
+It is best advised to ensure that our data is normally distributed prior to fitting our models in order to stabilize variance, and ensure accurate forecasts, as well as to aid normal distribution in residuals. We can first interpret the BoxCox plots in order to determine the proper transformation for each data set. 
+
+```{R}
+# plot box cox plots for lambda estimation
+par(mfrow = c(3,2))
+boxcox(coal_train$Coal ~ as.numeric(1:length(coal_train$Coal)), xlab = "Coal") 
+boxcox(naturalgas_train$Natural_Gas ~ as.numeric(1:length(naturalgas_train$Natural_Gas)), xlab = "Natural Gas") 
+boxcox(nuclear_train$Nuclear ~ as.numeric(1:length(nuclear_train$Nuclear)), xlab = "Nuclear") 
+boxcox(wind_train$Wind ~ as.numeric(1:length(wind_train$Wind)), xlab = "Wind") 
+boxcox(hydro_train$Hydro ~ as.numeric(1:length(hydro_train$Hydro)), xlab = "Hydro") 
+```
+As we have seen above, we have the boxcox plots above to estimate the optimal parameter $\lambda$, which will dictate how we will transform our data. We have extracted the estimated $\lambda$ values below:
+
+- Coal: $\lambda = 1$, no transformation
+- Natural Gas: $\lambda = 0.5$, $sqrt(y)$
+- Nuclear: $\lambda = 1$, no transformation 
+- Wind: $\lambda = 0$, $ln(y)$
+- Hydro: $\lambda = 0$, $ln(y)$
+
+
+We will proceed with the following transformations to the data. 
+```{R echo = FALSE}
+# for sets with no transformation, we will use suffix "_transf" just for uniformity
+# and ease of reference
+
+coal_train_transf <- coal_train_ts
+naturalgas_train_transf <- sqrt(naturalgas_train_ts)
+nuclear_train_transf <- nuclear_train_ts
+wind_train_transf <- log(wind_train_ts)
+hydro_train_transf <- log(hydro_train_ts)
+```
+
+We can see that the transformation deemed effective in resembling a normal distribution. Despite roughly normalizing the data, we should apply differencing to remove any trends or seasonal trends from the data. 
+
+### Differencing
+As stated earlier, differencing is effective to remove any trends or seasonal trends. In the decomposition graphs, there is seasonality present in all graphs, so we should first difference with respect to months. 
+
+We opted for the use of lag = 12, as we are working with *monthly* data, as there are 12 months each year in order to remove any seasonality. We will observe the effects by using the Shapiro-Wilk test, using the hypotheses:
+
+$H_0 = \text{Sample is normally distributed}$
+
+$H_1 = \text{Sample is not normally distributed}$
+
+```{r echo = FALSE}
+# applying differencing with lag = 12
+
+coal_train_diff <- coal_train_transf %>% diff(lag = 12)
+naturalgas_train_diff <- naturalgas_train_transf %>% diff(lag = 12)
+nuclear_train_diff <- nuclear_train_transf %>% diff(lag = 12)
+wind_train_diff <- wind_train_transf %>% diff(lag = 12)
+hydro_train_diff <- hydro_train_transf %>% diff(lag = 12)
+
+par(mfrow = c(3,2))
+shapiro.test(coal_train_diff)
+shapiro.test(naturalgas_train_diff)
+shapiro.test(nuclear_train_diff)
+shapiro.test(wind_train_diff)
+shapiro.test(hydro_train_diff)
+```
+
+From our Shapiro-Wilk tests, we only achieve normality for natural gas data, so we'll go ahead by differencing a second time but with respect to lag = 1, to remove further difference any trends.
+
+```{R}
+coal_train_diff <- coal_train_diff %>% diff(lag = 1)
+naturalgas_train_diff <- naturalgas_train_diff %>% diff(lag = 1)
+nuclear_train_diff <- nuclear_train_diff %>% diff(lag = 1)
+wind_train_diff <- wind_train_diff %>% diff(lag = 1)  
+hydro_train_diff <- hydro_train_diff %>% diff(lag = 1)
+
+
+# tests to ensure normality/stationarity 
+shapiro.test(coal_train_diff)
+shapiro.test(naturalgas_train_diff)
+shapiro.test(nuclear_train_diff)
+shapiro.test(wind_train_diff)
+shapiro.test(hydro_train_diff)
+
+adf.test(coal_train_diff)
+adf.test(naturalgas_train_diff)
+adf.test(nuclear_train_diff)
+adf.test(wind_train_diff)
+adf.test(hydro_train_diff)
+```
+```{R}
+par(mfrow = c(3,2))
+hist(coal_train_diff, main = "Differenced Coal Data", col = "#52796F")
+hist(naturalgas_train_diff, main = "Differenced Natural Gas Data", col = "#52796F")
+hist(nuclear_train_diff, main = "Differenced Nuclear Data", col = "#52796F")
+hist(wind_train_diff, main = "Differenced Wind Data", col = "#52796F")
+hist(hydro_train_diff, main = "Differenced Hydro Data", col = "#52796F")
+```
+
+# Time Series Modeling
+
+This section will go through model identification via ACF and PACF plots, tuning parameters as well as validating our models using our training set. Since we have dealt with seasonal and differencing, we will expect to extract seasonal and nonseasonal parameters from these plots. In the future ACF/PACF plots, the values will resemble both a sinusoidal and exponential decay, signaling the presence of an ARMA model. Compounding with the fact that we have introduced both differencing and seasonal detrending, we are aiming to fit a SARIMA model for each data sets.
+
+The following guidelines are used for the extraction of both nonseasonal and seasonal AR and MA parameters:
+
+-   *Non-Seasonal:* Observe spikes within the first season (in this case, first 12 lags)
+-   *Seasonal:* Observe spikes within lags 12, 24, ... as you want to focus on the lags between end of each season (intervals of 12)
+
+Additionally, since we differenced our data once each for seasonal and non-seasonal, we have a d=D=1, and an S value of 12, because we have a seasonal period of 12 months. 
+
+## Coal Data Set
+
+### Building Models
+
+```{r echo = FALSE}
+par(mar=c(4,4,3,1) + 0.1)
+acf(coal_train_diff, lag.max = 48, main = "ACF of Coal")
+pacf(coal_train_diff, lag.max = 48, main = "PACF of Coal")
+```
+
+-   *ACF:* For non-seasonal terms, we observe possible q values: 0, 1, 11 and for seasonal terms Q: 1
+
+-   *PACF:* For non-seasonal terms, we observe possible p values: 1, 11 and for seasonal terms P: 1,2,3
+
+```{r echo=T, eval = FALSE}
+## CODE ADAPTED FROM PSTAT 131
+
+# write grid, with AICc as NULL (will be filled in later if applicable)
+coal_grid <- cbind(expand.grid(p=c(1), q=c(0, 1), P=c(1,2,3), Q=1), AICc=NA) #
+
+# iterate through the list for each combination
+for (i in 1:nrow(coal_grid)) { 
+  try(arima.obj <- arima(coal_train_transf, order=c(coal_grid$p[i], 1, coal_grid$q[i]),
+                         seasonal=list(order=c(coal_grid$P[i], 1, coal_grid$Q[i]), period=12),
+                         method="ML")) # preset 
+  if (!is.null(arima.obj)) { 
+    coal_grid$AICc[i] <- AICc(arima.obj) 
+    } # if the result isn't NULL, add that to table
+}
+coal_grid[order(coal_grid$AICc, decreasing = FALSE), ][c(1:5),]
+```
+
+After fitting our SARIMA model grid, we extracted 3 model whose AICc value is the lowest, which indicates the best performing models. The AIC (Akaike Information Criterion) is a useful metric for prediction error for time series models. To compare models, the model with a lower AIC value would mean a more accurate model.
+
+- Model 1: p = 1, q = 0, P = 3, Q = 1 AICc = 4906.069
+
+- Model 2: p = 1, q = 1, P = 3, Q = 1 AICc = 4906.069
+
+- Model 3: p = 1, q = 0, P = 2, Q = 1 AICc = 4912.311
+
+Model 1: p = 1, q = 0, P = 3, Q = 1
+```{r}
+# MODEL 1 (p = 1, q = 0, P = 3, Q = 1 )
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+
+coal_model1 <- sarima(coal_train_transf, 
+                      p = 1, d = 1, q = 0, 
+                      P = 3, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+coal_model1_resid <- coal_model1$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(coal_model1_resid, main = "Plot of Coal Model 1 Residuals")
+
+# NORMALITY
+hist(coal_model1_resid, col = "#52796F")
+
+# STATIONARITY
+acf(coal_model1_resid, main = "ACF of Coal Model 1 Residuals")
+pacf(coal_model1_resid, main = "PACF of Coal Model 1 Residuals")
+
+Box.test(coal_model1_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(coal_model1_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+# WHITE NOISE
+ar.yw(coal_model1_resid, aic=TRUE, order.max=NULL)
+```
+
+As we can see, this model, despite having the lowest AICc value, does not past the box-pierce or the box-ljung tests, therefore we proceed to the next model and run our tests for that one. The next possible model to be fitted is:
+
+New Model 1: p = 1, q = 1, P = 2, Q = 1 AICc = 4912.311
+```{r}
+# NEW MODEL 1 (p = 1, q = 1, P = 2, Q = 1 )
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+
+coal_model1 <- sarima(coal_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 2, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+coal_model1_resid <- coal_model1$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(coal_model1_resid, main = "Plot of Coal Model 1 Residuals")
+
+# NORMALITY
+hist(coal_model1_resid, col = "#52796F", main = "Histogram of Model 1 Residuals")
+
+# STATIONARITY
+acf(coal_model1_resid, main = "ACF of Coal Model 1 Residuals")
+pacf(coal_model1_resid, main = "PACF of Coal Model 1 Residuals")
+
+Box.test(coal_model1_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(coal_model1_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+# WHITE NOISE
+ar.yw(coal_model1_resid, aic=TRUE, order.max=NULL)
+```
+This is much better, we then proceed to confirm the roots to ensure that this model is stationary.
+```{R}
+# unit circle check
+par(mfrow = c(2,2))
+coal_model1$fit$coef
+uc.check(pol_ = c(1,0.2135445), print_output = FALSE)
+uc.check(pol_ = c(1,-0.5353553), print_output = FALSE)
+uc.check(pol_ = c(1,0.1566115, -0.1414930), print_output = FALSE)
+uc.check(pol_ = c(1,-0.8720911), print_output = FALSE)
+```
+
+Model 2: p = 1, q = 1, P = 3, Q = 1
+```{r}
+# MODEL 2 (p = 1, q = 1, P = 3, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+coal_model2 <- sarima(coal_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 3, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+coal_model2_resid <- coal_model2$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(coal_model2_resid, main = "Plot of Coal Model 2 Residuals")
+
+# NORMALITY
+hist(coal_model2_resid, col = "#52796F", main = "Histogram of Model 2 Residuals")
+
+# STATIONARITY
+acf(coal_model2_resid, main = "ACF of Coal Model 2 Residuals")
+pacf(coal_model2_resid, main = "PACF of Coal Model 2 Residuals")
+
+Box.test(coal_model2_resid, lag = 15, type = "Box-Pierce", fitdf = 6)
+Box.test(coal_model2_resid, lag = 15, type = "Ljung-Box", fitdf = 6)
+
+# WHITE NOISE
+ar.yw(coal_model2_resid, aic=TRUE, order.max=NULL)
+```
+
+```{R}
+# unit circle check
+par(mfrow = c(2,2))
+coal_model2$fit$coef
+uc.check(pol_ = c(1,0.20131352), print_output = FALSE)
+uc.check(pol_ = c(1,-0.50299349), print_output = FALSE)
+uc.check(pol_ = c(1,0.05436416, -0.16091039,-0.21544558), print_output = FALSE)
+uc.check(pol_ = c(1,-0.78798766 ), print_output = FALSE)
+```
+
+- MODEL 3 ( p = 1, q = 0, P = 2, Q = 1) -> Failed, 
+
+New Model 3: p = 1, q = 1, P = 1, Q = 1
+```{r}
+# MODEL 3 ( p = 1, q = 0, P = 2, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+coal_model3 <- sarima(coal_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+coal_model3_resid <- coal_model3$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(coal_model3_resid, main = "Plot of Coal Model 3 Residuals")
+
+# NORMALITY
+hist(coal_model3_resid, col = "#52796F", main = "Histogram of Model 3 Residuals")
+
+# STATIONARITY
+acf(coal_model3_resid, main = "ACF of Coal Model 3 Residuals")
+pacf(coal_model3_resid, main = "PACF of Coal Model 3 Residuals")
+
+Box.test(coal_model3_resid, lag = 15, type = "Box-Pierce", fitdf = 4)
+Box.test(coal_model3_resid, lag = 15, type = "Ljung-Box", fitdf = 4)
+
+ar.yw(coal_model3_resid, aic=TRUE, order.max=NULL)
+```
+
+```{R}
+# unit circle check
+par(mfrow = c(2,2))
+coal_model3$fit$coef
+uc.check(pol_ = c(1,0.2219525), print_output = FALSE)
+uc.check(pol_ = c(1,-0.5245058), print_output = FALSE)
+uc.check(pol_ = c(1,0.1773505), print_output = FALSE)
+uc.check(pol_ = c(1,-0.9172771), print_output = FALSE)
+```
+
+Top 3 Model Summaries:
+
+- Model 1: p = 1, q = 1, P = 2, Q = 1
+- Model 2: p = 1, q = 1, P = 3, Q = 1
+- Model 3: p = 1, q = 0, P = 1, Q = 1
+
+### Forecasting 
+
+```{r}
+# MODEL 1
+coal_model1_forecast <- sarima.for(coal_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 2, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Coal Data for Model 1")
+lines(coal_test_ts, col = "blue", type = "b")
+
+coal_model1_mse <- mse(actual = coal_test_ts, predicted = coal_model1_forecast$pred); coal_model1_mse
+
+# MODEL 2
+coal_model2_forecast <- sarima.for(coal_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 3, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Coal Data for Model 2")
+lines(coal_test_ts, col = "blue", type = "b")
+
+coal_model2_mse <- mse(actual = coal_test_ts, predicted = coal_model2_forecast$pred); coal_model2_mse
+
+# MODEL 3
+coal_model3_forecast <- sarima.for(coal_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Coal Data for Model 3")
+lines(coal_test_ts, col = "blue", type = "b")
+
+coal_model3_mse <- mse(actual = coal_test_ts, predicted = coal_model3_forecast$pred); coal_model3_mse
+```
+
+## Natural Gas Data Set
+
+### Building Models
+
+```{r echo = FALSE}
+par(mar=c(4,4,3,1) + 0.1)
+acf(naturalgas_train_diff, lag.max = 48, main = "ACF of Natural Gas")
+pacf(naturalgas_train_diff, lag.max = 48, main = "PACF of Natural Gas")
+```
+-   *ACF:* For non-seasonal terms, we observe q values: 0, 1, 2 and for seasonal terms Q: 1
+
+-   *PACF:* For non-seasonal terms, we observe possible p values: 1, 2, 11 and for seasonal terms P: 1, 2, 3
+
+```{r echo = TRUE, warning = FALSE}
+# write grid, with AICc as NULL (will be filled in later if applicable)
+natgas_grid <- cbind(expand.grid(p=c(1,2,11), q=c(1,2), P=c(1,2,3), Q=c(1)), AICc=NA)
+
+# iterate through the list for each combination
+for (i in 1:nrow(natgas_grid)) {
+  try(arima.obj <- arima(naturalgas_train_transf, order=c(natgas_grid$p[i], 1, natgas_grid$q[i]),
+                         seasonal=list(order=c(natgas_grid$P[i], 1, natgas_grid$Q[i]), period=12),
+                         method="ML"))
+  if (!is.null(arima.obj)) {
+    natgas_grid$AICc[i] <- AICc(arima.obj) 
+    }
+}
+natgas_grid[order(natgas_grid$AICc, decreasing = FALSE), ]
+```
+
+- Model 1: p = 2, q = 2, P = 1, Q = 1 AICc = 1721.499
+
+- Model 2: p = 1, q = 2, P = 1, Q = 1 AICc = 1722.211
+
+- Model 3: p = 2, q = 1, P = 1, Q = 1 AICc = 1722.537
+
+```{r}
+# MODEL 1 (p = 2, q = 2, P = 1, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+natgas_model1 <- sarima(naturalgas_train_transf, 
+                      p = 2, d = 1, q = 2, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+natgas_model1_resid <- natgas_model1$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(natgas_model1_resid, main = "Plot of NatGas Model 1 Residuals")
+
+# NORMALITY
+hist(natgas_model1_resid, main = "Histogram of NatGas Model 1 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(natgas_model1_resid, main = "ACF of Nuclear Model 1 Residuals")
+pacf(natgas_model1_resid, main = "PACF of Nuclear Model 1 Residuals")
+
+Box.test(natgas_model1_resid, lag = 15, type = "Box-Pierce", fitdf = 6)
+Box.test(natgas_model1_resid, lag = 15, type = "Ljung-Box", fitdf = 6)
+
+ar.yw(natgas_model1_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+# Model 1 Unit Circle Check
+par(mfrow = c(2,2))
+natgas_model1$fit$coef
+uc.check(pol_ = c(1,-0.23604082, 0.69823290), print_output = FALSE)
+uc.check(pol_ = c(1,-0.09016550, -0.90983270), print_output = FALSE)
+uc.check(pol_ = c(1,-0.0282940), print_output = FALSE)
+uc.check(pol_ = c(1,-0.86174748), print_output = FALSE)
+```
+
+```{R}
+# MODEL 2 (p = 1, q = 2, P = 1, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+natgas_model2 <- sarima(naturalgas_train_transf, 
+                      p = 1, d = 1, q = 2, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+natgas_model2_resid <- natgas_model2$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(natgas_model2_resid, main = "Plot of NatGas Model 2 Residuals")
+
+# NORMALITY
+hist(natgas_model2_resid, main = "Histogram of NatGas Model 2 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(natgas_model2_resid, main = "ACF of Nuclear Model 2 Residuals")
+pacf(natgas_model2_resid, main = "PACF of Nuclear Model 2 Residuals")
+
+Box.test(natgas_model2_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(natgas_model2_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(natgas_model2_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+natgas_model2$fit$coef
+uc.check(pol_ = c(1,0.79271137), print_output = FALSE)
+uc.check(pol_ = c(1,-1.17322038, 0.17322252), print_output = FALSE)
+uc.check(pol_ = c(1,0.01039321), print_output = FALSE)
+uc.check(pol_ = c(1,-0.84558100), print_output = FALSE)
+```
+
+```{r}
+# MODEL 3 (p = 2, q = 1, P = 1, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+natgas_model3 <- sarima(naturalgas_train_transf, 
+                      p = 2, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+
+# RESIDUALS
+natgas_model3_resid <- natgas_model3$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(natgas_model3_resid, main = "Plot of NatGas Model 3 Residuals")
+
+# NORMALITY
+hist(natgas_model3_resid, main = "Histogram of NatGas Model 3 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(natgas_model3_resid, main = "ACF of Nuclear Model 3 Residuals")
+pacf(natgas_model3_resid, main = "PACF of Nuclear Model 3 Residuals")
+
+Box.test(natgas_model3_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(natgas_model3_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(natgas_model3_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+natgas_model3$fit$coef
+uc.check(pol_ = c(1,0.627716375, 0.112043365), print_output = FALSE)
+uc.check(pol_ = c(1, -0.999999500), print_output = FALSE)
+uc.check(pol_ = c(1,0.006102198), print_output = FALSE)
+uc.check(pol_ = c(1,-0.845990043), print_output = FALSE)
+```
+FINAL 3 MODELS:
+- Model 1: p = 2, q = 2, P = 1, Q = 1 
+
+- Model 2: p = 1, q = 2, P = 1, Q = 1 
+
+- Model 3: p = 2, q = 1, P = 1, Q = 1 
+
+### Forecasting
+```{r}
+# MODEL 1
+naturalgas_model1_forecast <- sarima.for(naturalgas_train_transf, n.ahead = 12, 
+                              p = 2, d = 1, q = 2, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Natural Gas Data for Model 1")
+lines(sqrt(naturalgas_test_ts), col = "blue", type = "b")
+
+naturalgas_model1_mse <- mse(actual = naturalgas_test_ts, predicted = (naturalgas_model1_forecast$pred)^2); naturalgas_model1_mse
+
+# MODEL 2
+naturalgas_model2_forecast <- sarima.for(naturalgas_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 2, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Natural Gas Data for Model 2")
+lines(sqrt(naturalgas_test_ts), col = "blue", type = "b")
+
+naturalgas_model2_mse <- mse(actual = naturalgas_test_ts, predicted = (naturalgas_model2_forecast$pred)^2); naturalgas_model2_mse
+
+# MODEL 3
+naturalgas_model3_forecast <- sarima.for(naturalgas_train_transf, n.ahead = 12, 
+                              p = 2, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Natural Gas Data for Model 3")
+lines(sqrt(naturalgas_test_ts), col = "blue", type = "b")
+
+naturalgas_model3_mse <- mse(actual = naturalgas_test_ts, predicted = (naturalgas_model3_forecast$pred)^2); naturalgas_model3_mse
+```
+
+## Nuclear Data Set
+### Building Models
+
+```{r echo = FALSE}
+par(mar=c(4,4,3,1) + 0.1)
+acf(nuclear_train_diff, lag.max = 48, main = "ACF of Differenced Nuclear Data")
+pacf(nuclear_train_diff, lag.max = 48, main = "PACF of Differenced Nuclear Data")
+```
+
+-   *ACF:* For non-seasonal terms, we observe possible q values: 1, 2, 6, 10 and for seasonal terms Q: 1
+
+-   *PACF:* For non-seasonal terms, we observe possible p values: 1, 2, 6, 10, 11 and for seasonal terms P: 1, 2
+
+```{r echo = TRUE, warning = FALSE}
+# write grid, with AICc as NULL (will be filled in later if applicable)
+nuclear_grid <- cbind(expand.grid(p=c(1,2,6,10), q=c(1,2,6,10), P=c(1,2), Q=1), AICc=NA)
+
+# iterate through the list for each combination
+for (i in 1:nrow(nuclear_grid)) {
+  try(arima.obj <- arima(nuclear_train_transf, order=c(nuclear_grid$p[i], 1, nuclear_grid$q[i]),
+                         seasonal=list(order=c(nuclear_grid$P[i], 1, nuclear_grid$Q[i]), period=12),
+                         method="ML"))
+  if (!is.null(arima.obj)) {
+    nuclear_grid$AICc[i] <- AICc(arima.obj) 
+    }
+}
+nuclear_grid[order(nuclear_grid$AICc, decreasing = FALSE), ][c(1:10),]
+```
+- Model 1: p = 1, q =1, P = 1, Q = 1 AICc = 4192.183
+
+- Model 2: p = 1, q = 1, P = 1, Q = 2 AICc = 4193.825
+
+- Model 3: p = 1, q = 2, P = 1, Q = 1 AICc = 4194.207
+
+```{r}
+# MODEL 1 (p = 1, q =1, P = 1, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+nuclear_model1 <- sarima(nuclear_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+nuclear_model1_resid <- nuclear_model1$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(nuclear_model1_resid, main = "Plot of Nuclear Model 1 Residuals")
+
+# NORMALITY
+hist(nuclear_model1_resid, main = "Histogram of Nuclear Model 1 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(nuclear_model1_resid, main = "ACF of Nuclear Model 1 Residuals")
+pacf(nuclear_model1_resid, main = "PACF of Nuclear Model 1 Residuals")
+
+Box.test(nuclear_model1_resid, lag = 15, type = "Box-Pierce", fitdf = 4)
+Box.test(nuclear_model1_resid, lag = 15, type = "Ljung-Box", fitdf = 4)
+
+ar.yw(nuclear_model1_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+nuclear_model1$fit$coef
+uc.check(pol_ = c(1,0.524131608 ), print_output = FALSE)
+uc.check(pol_ = c(1,-0.928073227 ), print_output = FALSE)
+uc.check(pol_ = c(1,0.007776362 ), print_output = FALSE)
+uc.check(pol_ = c(1,-0.902323763 ), print_output = FALSE)
+```
+
+```{r}
+# MODEL 2 (p = 1, q = 1, P = 1, Q = 2)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+nuclear_model2 <- sarima(nuclear_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 2, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+nuclear_model2_resid <- nuclear_model2$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(nuclear_model2_resid, main = "Plot of Nuclear Model 2 Residuals")
+
+# NORMALITY
+hist(nuclear_model2_resid, main = "Histogram of Nuclear Model 2 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(nuclear_model2_resid, main = "ACF of Nuclear Model 2 Residuals")
+pacf(nuclear_model2_resid, main = "PACF of Nuclear Model 2 Residuals")
+
+Box.test(nuclear_model2_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(nuclear_model2_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(nuclear_model2_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+nuclear_model2$fit$coef
+uc.check(pol_ = c(1,0.5239403), print_output = FALSE)
+uc.check(pol_ = c(1,-0.9296086), print_output = FALSE)
+uc.check(pol_ = c(1,-0.6933447), print_output = FALSE)
+uc.check(pol_ = c(1,-0.1678194,-0.6855227), print_output = FALSE)
+```
+
+```{r}
+# MODEL 3 (p = 1, q = 2, P = 1, Q = 1)
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+nuclear_model3 <- sarima(nuclear_train_transf, 
+                      p = 1, d = 1, q = 2, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+nuclear_model3_resid <- nuclear_model3$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(nuclear_model3_resid, main = "Plot of Nuclear Model 3 Residuals")
+
+# NORMALITY
+hist(nuclear_model3_resid, main = "Histogram of Nuclear Model 3 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(nuclear_model3_resid, main = "ACF of Nuclear Model 3 Residuals")
+pacf(nuclear_model3_resid, main = "PACF of Nuclear Model 3 Residuals")
+
+Box.test(nuclear_model3_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(nuclear_model3_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(nuclear_model3_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+nuclear_model3$fit$coef
+uc.check(pol_ = c(1,0.491157409), print_output = FALSE)
+uc.check(pol_ = c(1,-0.885798807, -0.035701985 ), print_output = FALSE)
+uc.check(pol_ = c(1,0.007973741), print_output = FALSE)
+uc.check(pol_ = c(1,-0.902598545), print_output = FALSE)
+```
+
+FINAL 3 MODELS: 
+- Model 1: p = 1, q =1, P = 1, Q = 1 AICc = 4192.183
+
+- Model 2: p = 1, q = 1, P = 1, Q = 2 AICc = 4193.825
+
+- Model 3: p = 1, q = 2, P = 1, Q = 1 AICc = 4194.207
+
+### Forecasting
+```{r}
+# MODEL 1
+nuclear_model1_forecast <- sarima.for(nuclear_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Nuclear Data for Model 1")
+lines(nuclear_test_ts, col = "blue", type = "b")
+
+nuclear_model1_mse <- mse(actual = nuclear_test_ts, predicted = nuclear_model1_forecast$pred); nuclear_model1_mse
+
+# MODEL 2
+nuclear_model2_forecast <- sarima.for(nuclear_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 2, 
+                              S = 12,
+                              main = "Forecast on Nuclear Data for Model 2")
+lines(nuclear_test_ts, col = "blue", type = "b")
+
+nuclear_model2_mse <- mse(actual = nuclear_test_ts, predicted = nuclear_model2_forecast$pred); nuclear_model2_mse
+
+# MODEL 3
+nuclear_model3_forecast <- sarima.for(nuclear_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 2, 
+                              P = 1, D = 1, Q = 2, 
+                              S = 12,
+                              main = "Forecast on Nuclear Data for Model 3")
+lines(nuclear_test_ts, col = "blue", type = "b")
+
+nuclear_model3_mse <- mse(actual = nuclear_test_ts, predicted = nuclear_model3_forecast$pred); nuclear_model3_mse
+```
+
+## Wind Data Set
+
+### Building Models
+
+```{r echo = FALSE}
+par(mar=c(4,4,3,1) + 0.1)
+acf(wind_train_diff, lag.max = 48, main = "ACF of Differenced Wind Data")
+pacf(wind_train_diff, lag.max = 48, main = "PACF of Differenced Wind Data")
+```
+
+-   *ACF:* For non-seasonal terms, we observe possible q values: 1, 11 and for seasonal terms Q: 1
+
+-   *PACF:* For non-seasonal terms, we observe possible p values: 1, 2, 3, 4, 11 and for seasonal terms P: 1, 2, 3
+
+```{r echo = TRUE, warning = FALSE}
+# write grid, with AICc as NULL (will be filled in later if applicable)
+wind_grid <- cbind(expand.grid(p=c(1, 2, 3, 4), q=c(1, 11), P=c(1,2,3), Q=c(1)), AICc=NA)
+
+# iterate through the list for each combination
+for (i in 1:nrow(wind_grid)) {
+  try(arima.obj <- arima(wind_train_transf, order=c(wind_grid$p[i], 1, wind_grid$q[i]),
+                         seasonal=list(order=c(wind_grid$P[i], 1, wind_grid$Q[i]), period=12),
+                         method="ML"))
+  if (!is.null(arima.obj)) { 
+    wind_grid$AICc[i] <- AICc(arima.obj)
+    }
+}
+wind_grid[order(wind_grid$AICc, decreasing = FALSE), ][c(1:3),]
+```
+
+- Model 1: p = 2, q = 1, P = 1, Q = 1 AICc = -323.4258
+
+- Model 2: p = 1, q = 1, P = 1, Q = 1 AICc = -322.5606
+
+- Model 3: p = 3, q = 1, P = 1, Q = 1 AICc = -321.3492
+
+```{r}
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+# MODEL 1 (p = 2, q = 1, P = 1, Q = 1)
+wind_model1 <- sarima(wind_train_transf, 
+                      p = 2, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+wind_model1_resid <- wind_model1$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(wind_model1_resid, main = "Plot of Wind Model 1 Residuals")
+
+# NORMALITY
+hist(wind_model1_resid, main = "Histogram of Wind Model 1 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(wind_model1_resid, main = "ACF of Wind Model 1 Residuals")
+pacf(wind_model1_resid, main = "PACF of Wind Model 1 Residuals")
+
+Box.test(wind_model1_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(wind_model1_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(wind_model1_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+wind_model1$fit$coef
+uc.check(pol_ = c(1, 0.2624388, 0.1354420), print_output = FALSE)
+uc.check(pol_ = c(1, -0.8386428), print_output = FALSE)
+uc.check(pol_ = c(1,-0.1568817), print_output = FALSE)
+uc.check(pol_ = c(1,-0.6280160), print_output = FALSE)
+```
+
+```{r}
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+# MODEL 2 (p = 1, q = 1, P = 1, Q = 1)
+wind_model2 <- sarima(wind_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+wind_model2_resid <- wind_model2$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(wind_model2_resid, main = "Plot of Wind Model 2 Residuals")
+
+# NORMALITY
+hist(wind_model2_resid, main = "Histogram of Wind Model 2 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(wind_model2_resid, main = "ACF of Wind Model 1 Residuals")
+pacf(wind_model2_resid, main = "PACF of Wind Model 1 Residuals")
+
+Box.test(wind_model2_resid, lag = 15, type = "Box-Pierce", fitdf = 4)
+Box.test(wind_model2_resid, lag = 15, type = "Ljung-Box", fitdf = 4)
+
+ar.yw(wind_model2_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+wind_model2$fit$coef
+uc.check(pol_ = c(1, 0.2065713), print_output = FALSE)
+uc.check(pol_ = c(1, -0.7656456), print_output = FALSE)
+uc.check(pol_ = c(1, -0.1597412), print_output = FALSE)
+uc.check(pol_ = c(1,-0.6141800), print_output = FALSE)
+```
+
+```{r}
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+# MODEL 3 (p = 3, q = 1, P = 1, Q = 1)
+wind_model3 <- sarima(wind_train_transf, 
+                      p = 3, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+wind_model3_resid <- wind_model3$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(wind_model3_resid, main = "Plot of Wind Model 3 Residuals")
+
+# NORMALITY
+hist(wind_model3_resid, main = "Histogram of Wind Model 3 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(wind_model3_resid, main = "ACF of Wind Model 3 Residuals")
+pacf(wind_model3_resid, main = "PACF of Wind Model 3 Residuals")
+
+Box.test(wind_model3_resid, lag = 15, type = "Box-Pierce", fitdf = 6)
+Box.test(wind_model3_resid, lag = 15, type = "Ljung-Box", fitdf = 6)
+
+ar.yw(wind_model3_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+wind_model3$fit$coef
+uc.check(pol_ = c(1, 0.26565882, 0.13547757, 0.01558606), print_output = FALSE)
+uc.check(pol_ = c(1, -0.84423429), print_output = FALSE)
+uc.check(pol_ = c(1, -0.15809325), print_output = FALSE)
+uc.check(pol_ = c(1,-0.62521803), print_output = FALSE)
+```
+FINAL 3 MODELS:
+- Model 1: p = 2, q = 1, P = 1, Q = 1 AICc = -323.4258
+
+- Model 2: p = 1, q = 1, P = 1, Q = 1 AICc = -322.5606
+
+- Model 3: p = 3, q = 1, P = 1, Q = 1 AICc = -321.3492
+
+### Forecasting
+```{r}
+# MODEL 1
+wind_model1_forecast <- sarima.for(wind_train_transf, n.ahead = 12, 
+                              p = 2, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Wind Data for Model 1")
+lines(log(wind_test_ts), col = "blue", type = "b")
+
+wind_model1_mse <- mse(actual = wind_test_ts, predicted = exp(wind_model1_forecast$pred)); wind_model1_mse
+
+# MODEL 2
+wind_model2_forecast <- sarima.for(wind_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Wind Data for Model 2")
+lines(log(wind_test_ts), col = "blue", type = "b")
+
+wind_model2_mse <- mse(actual = wind_test_ts, predicted = exp(wind_model1_forecast$pred)); wind_model2_mse
+
+# MODEL 3
+wind_model3_forecast <- sarima.for(wind_train_transf, n.ahead = 12, 
+                              p = 3, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Wind Data for Model 3")
+lines(log(wind_test_ts), col = "blue", type = "b")
+
+wind_model3_mse <- mse(actual = wind_test_ts, predicted = exp(wind_model3_forecast$pred)); wind_model3_mse
+```
+## Hydro Data Set
+
+### Building Models
+
+```{r echo = FALSE}
+par(mar=c(4,4,3,1) + 0.1)
+acf(hydro_train_diff, lag.max = 48, main = "ACF for Differenced Hydro Data")
+pacf(hydro_train_diff, lag.max = 48, main = "PACF for Differenced Hydro Data")
+```
+
+-   *ACF:* For non-seasonal terms, we observe possible q values: 0, 1, 2 and for seasonal terms Q: 1, 2
+
+-   *PACF:* For non-seasonal terms, we observe possible p values: 1, 2, 11 and for seasonal terms P: 1, 2, 3, 4
+
+```{r echo = TRUE, warning = FALSE}
+# write grid, with AICc as NULL (will be filled in later if applicable)
+hydro_grid <- cbind(expand.grid(p=c(1, 2, 11), q=c(0, 1, 2), P=c(1, 2, 3, 4), Q=c(1,2)), AICc=NA)
+
+# iterate through the list for each combination
+for (i in 1:nrow(hydro_grid)) {
+  try(arima.obj <- arima(hydro_train_transf, order=c(hydro_grid$p[i], 1, hydro_grid$q[i]),
+                         seasonal=list(order=c(hydro_grid$P[i], 1, hydro_grid$Q[i]), period=12),
+                         method="ML"))
+  if (!is.null(arima.obj)) { 
+    hydro_grid$AICc[i] <- AICc(arima.obj) 
+    }
+}
+hydro_grid[order(hydro_grid$AICc, decreasing = FALSE), ][c(1:4),]
+```
+- Model 1: p = 1, q = 1, P = 1, Q = 1 AICc = -532.2892
+
+- Model 2: p = 1, q = 1, P = 1, Q = 2 AICc = -530.3733
+
+- Model 3: p = 1, q = 2, P = 1, Q = 1 AICc = -530.1744
+
+```{r}
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+# MODEL 1 (p = 2, q = 1, P = 1, Q = 1)
+hydro_model1 <- sarima(hydro_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+hydro_model1_resid <- hydro_model1$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(hydro_model1_resid, main = "Plot of Hydro Model 1 Residuals")
+
+# NORMALITY
+hist(hydro_model1_resid, main = "Histogram of Hydro Model 1 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(hydro_model1_resid, main = "ACF of Hydro Model 1 Residuals")
+pacf(hydro_model1_resid, main = "PACF of Hydro Model 1 Residuals")
+
+Box.test(hydro_model1_resid, lag = 15, type = "Box-Pierce", fitdf = 4)
+Box.test(hydro_model1_resid, lag = 15, type = "Ljung-Box", fitdf = 4)
+
+ar.yw(hydro_model1_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+hydro_model1$fit$coef
+uc.check(pol_ = c(1, 0.7452682), print_output = FALSE)
+uc.check(pol_ = c(1, -0.9999503), print_output = FALSE)
+uc.check(pol_ = c(1,0.1140089), print_output = FALSE)
+uc.check(pol_ = c(1,-0.9998900), print_output = FALSE)
+```
+
+```{r}
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+# MODEL 2 (p = 1, q = 1, P = 1, Q = 2) 
+hydro_model2 <- sarima(hydro_train_transf, 
+                      p = 1, d = 1, q = 1, 
+                      P = 1, D = 1, Q = 2, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+hydro_model2_resid <- hydro_model2$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(hydro_model2_resid, main = "Plot of Hydro Model 2 Residuals")
+
+# NORMALITY
+hist(hydro_model2_resid, main = "Histogram of Hydro Model 2 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(hydro_model2_resid, main = "ACF of Hydro Model 2 Residuals")
+pacf(hydro_model2_resid, main = "PACF of Hydro Model 2 Residuals")
+
+Box.test(hydro_model2_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(hydro_model2_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(hydro_model2_resid, aic=TRUE, order.max=NULL)
+```
+```{r}
+par(mfrow = c(2,2))
+hydro_model2$fit$coef
+uc.check(pol_ = c(1,  0.7469026), print_output = FALSE)
+uc.check(pol_ = c(1, -0.9999444), print_output = FALSE)
+uc.check(pol_ = c(1, 0.2902648), print_output = FALSE)
+uc.check(pol_ = c(1,-1.1739276, 0.1739449), print_output = FALSE)
+```
+
+```{r}
+par(mfrow = c(2,2), mar=c(4,4,3,1) + 0.1)
+# MODEL 3 (p = 1, q = 2, P = 1, Q = 1) 
+hydro_model3 <- sarima(hydro_train_transf, 
+                      p = 1, d = 1, q = 2, 
+                      P = 1, D = 1, Q = 1, 
+                      S = 12, 
+                      details = FALSE)
+
+## BEGIN RUNNING TESTS
+# RESIDUALS
+hydro_model3_resid <- hydro_model3$fit$residuals
+
+# GENERAL TS PLOT
+plot.ts(hydro_model3_resid, main = "Plot of Hydro Model 3 Residuals")
+
+# NORMALITY
+hist(hydro_model3_resid, main = "Histogram of Hydro Model 3 Residuals", col = "#52796F")
+
+# STATIONARITY
+acf(hydro_model3_resid, main = "ACF of Hydro Model 3 Residuals")
+pacf(hydro_model3_resid, main = "PACF of Hydro Model 3 Residuals")
+
+Box.test(hydro_model3_resid, lag = 15, type = "Box-Pierce", fitdf = 5)
+Box.test(hydro_model3_resid, lag = 15, type = "Ljung-Box", fitdf = 5)
+
+ar.yw(hydro_model3_resid, aic=TRUE, order.max=NULL)
+```
+
+```{r}
+par(mfrow = c(2,2))
+hydro_model3$fit$coef
+uc.check(pol_ = c(1, 0.64211643 ), print_output = FALSE)
+uc.check(pol_ = c(1, -0.86963350, -0.05138264), print_output = FALSE)
+uc.check(pol_ = c(1, 0.10583218), print_output = FALSE)
+uc.check(pol_ = c(1,-0.99992377), print_output = FALSE)
+```
+TOP 3 MODELS: 
+- Model 1: p = 1, q = 1, P = 1, Q = 1 AICc = -532.2892
+
+- Model 2: p = 1, q = 1, P = 1, Q = 2 AICc = -530.3733
+
+- Model 3: p = 1, q = 2, P = 1, Q = 1 AICc = -530.1744
+
+### Forecasting
+```{r}
+# MODEL 1
+hydro_model1_forecast <- sarima.for(hydro_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Hydro Data for Model 1")
+lines(log(hydro_test_ts), col = "blue", type = "b")
+
+hydro_model1_mse <- mse(actual = hydro_test_ts, predicted = exp(hydro_model1_forecast$pred)); hydro_model1_mse
+
+# MODEL 2
+hydro_model2_forecast <- sarima.for(hydro_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 1, 
+                              P = 1, D = 1, Q = 2, 
+                              S = 12,
+                              main = "Forecast on Hydro Data for Model 2")
+lines(log(hydro_test_ts), col = "blue", type = "b")
+
+hydro_model2_mse <- mse(actual = hydro_test_ts, predicted = exp(hydro_model2_forecast$pred)); hydro_model2_mse
+
+# MODEL 3
+hydro_model3_forecast <- sarima.for(hydro_train_transf, n.ahead = 12, 
+                              p = 1, d = 1, q = 2, 
+                              P = 1, D = 1, Q = 1, 
+                              S = 12,
+                              main = "Forecast on Hydro Data for Model 3")
+lines(log(hydro_test_ts), col = "blue", type = "b")
+
+hydro_model3_mse <- mse(actual = hydro_test_ts, predicted = exp(hydro_model3_forecast$pred)); hydro_model3_mse
+```
